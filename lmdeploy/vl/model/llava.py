@@ -22,8 +22,8 @@ def check_llava_install():
         import llava  # noqa: F401
     except ImportError:
         raise ImportError(
-            'To use LlavaVLModel, please install llava by '
-            'pip install git+https://github.com/haotian-liu/LLaVA.git --no-deps'  # noqa: E501
+            'To use LlavaVLModel, please install Soft-MoE-llava by '
+            'pip install git+https://github.com/AhmedZeer/Soft-MoE-LLaVA.git --no-deps'  # noqa: E501
         )
 
 
@@ -39,16 +39,42 @@ def _clip_vision_tower_load_model(self, **kwargs):
     self.is_loaded = True
 
 
+# TODO
+def _siglip_vision_tower_load_model(self, **kwargs):
+    logger.info(f'Siglip.load_model: {self.vision_tower_name}')
+    from transformers import (SiglipIPImageProcessor, SiglipVisionConfig,
+                              SiglipVisionModel)
+    self.image_processor = SiglipImageProcessor.from_pretrained(
+        self.vision_tower_name)
+    config = SiglipVisionConfig.from_pretrained(self.vision_tower_name)
+    self.vision_tower = SiglipVisionModel._from_config(config=config)
+    self.vision_tower.requires_grad_(False)
+    self.is_loaded = True
+
+
 @contextmanager
 def init_llava_vision_tower(config):
     """skip download vision model if possible."""
+    print("\n@ init_llava_vision")
+    print(config)
+    print("init_llava_vision @\n")
     if getattr(config, 'unfreeze_mm_vision_tower', False):
-        origin_func_path = [
-            'llava.model.multimodal_encoder.clip_encoder.CLIPVisionTower.load_model'  # noqa: E501
-        ]
-        rewrite_func = [_clip_vision_tower_load_model]
-        with rewrite_ctx(origin_func_path, rewrite_func):
-            yield
+        if "siglip" in getattr(config, 'mm_vision_tower', 'google/siglip-so400m-patch14-384'):
+            print("It is siglip.")
+            origin_func_path = [
+                'llava.model.multimodal_encoder.clip_encoder.SiglipVisionTower.load_model'  # noqa: E501
+            ]
+            rewrite_func = [_siglip_vision_tower_load_model]
+            with rewrite_ctx(origin_func_path, rewrite_func):
+                yield
+
+        else:
+            origin_func_path = [
+                'llava.model.multimodal_encoder.clip_encoder.CLIPVisionTower.load_model'  # noqa: E501
+            ]
+            rewrite_func = [_clip_vision_tower_load_model]
+            with rewrite_ctx(origin_func_path, rewrite_func):
+                yield
     else:
         yield
 
@@ -66,6 +92,7 @@ class LlavaVisionModel(VisonModel):
             mm_vision_tower = getattr(config, 'mm_vision_tower', '')
             # yi-vl has projector type of xxx_Norm
             projector_type = getattr(config, 'mm_projector_type', 'linear')
+            # soft_moe = getattr(config, 'soft_moe', False)
             if '_Norm' in projector_type:
                 return False
             if 'OpenGVLab' in mm_vision_tower:
@@ -103,6 +130,9 @@ class LlavaVisionModel(VisonModel):
             }  # disable vision part quantization
             model = AutoModelForCausalLM.from_config(self.config,
                                                      trust_remote_code=True)
+            print("@ lmdeploy_llava_buildmodel")
+            print(model)
+            print("lmdeploy_llava_buildmodel @")
 
         if not self.with_llm:
             # remove the LLM part from llava model.
@@ -136,11 +166,27 @@ class LlavaVisionModel(VisonModel):
         self.model = model.model.eval()
         self.vision_tower = model.model.vision_tower.half().eval()
         self.mm_projector = model.model.mm_projector.half().eval()
+        assert self.mm_projector != None, "Projector is None."
+        print("\n\n@ soft_moe")
+        print(self.mm_projector)
+
+        for name, param in self.mm_projector.named_parameters():
+            print(f"Layer: {name}")
+            print(f"Parameters: {param.data}")  # This will print the actual tensor values
+            print(f"Shape: {param.shape}")      # This will give you the shape of the parameter tensor
+            print("-" * 50)
+        print("soft_moe @\n\n")
 
     def encode_images(self, images: torch.Tensor) -> torch.Tensor:
         """encode images."""
+
+        print("\nEncoding Images @ lmdeploy_llava")
         image_features = self.vision_tower(images)
+        print("Images:", images)
+        print("After CLIP:", image_features)
         image_features = self.mm_projector(image_features)
+        print("After Projector:", image_features)
+        print("\nEncoding Images @ lmdeploy_llava")
         return image_features
 
     def preprocess(
@@ -241,3 +287,4 @@ class LlavaVisionModel(VisonModel):
             image_features = self.encode_images(images)
             image_features = [x for x in image_features]
         return image_features
+
